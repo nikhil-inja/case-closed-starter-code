@@ -1,0 +1,15 @@
+# docker-compose.yml for running ad3.py agent
+
+services:
+  agent:
+    build: .
+    container_name: case-closed-agent
+    ports:
+      - "5008:5008"
+    environment:
+      - PORT=5008
+    restart: unless-stopped
+    # Resource limits (competition limit: 1 CPU)
+    cpus: '1.0'
+    mem_limit: 2g
+
