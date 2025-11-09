@@ -1,4 +1,4 @@
-# Dockerfile for ad3.py Flask agent
+# Dockerfile for v29.py Flask agent
 
 # Use Python 3.12 slim image for smaller size
 FROM python:3.12-slim
@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the agent file
-COPY ad3.py .
+COPY v29.py .
 
 # Expose the port (default 5008, but can be overridden via PORT env var)
 EXPOSE 5008
@@ -22,4 +22,4 @@ EXPOSE 5008
 ENV PORT=5008
 
 # Run the Flask app
-CMD ["python", "ad3.py"]
+CMD ["python", "v29.py"]

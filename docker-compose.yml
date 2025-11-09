@@ -1,4 +1,4 @@
-# docker-compose.yml for running ad3.py agent
+# docker-compose.yml for running v29.py agent
 
 services:
   agent:
