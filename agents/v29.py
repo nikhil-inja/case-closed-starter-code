@@ -246,22 +246,34 @@ def path_cells(head, direction, steps):
 def joint_collision(my_head, opp_head, my_dir, opp_dir, my_boost, opp_boost):
     my_path = path_cells(my_head, my_dir, 2 if my_boost else 1)
     opp_path = path_cells(opp_head, opp_dir, 2 if opp_boost else 1)
-    
+
+    # Both end on same final cell → draw
     if my_path[-1] == opp_path[-1]:
         return "draw"
-    
+
+    # Any intermediate simultaneous collision → draw
     max_steps = max(len(my_path), len(opp_path))
     for i in range(max_steps):
         a = my_path[i] if i < len(my_path) else my_path[-1]
         b = opp_path[i] if i < len(opp_path) else opp_path[-1]
         if a == b:
             return "draw"
-    
-    if len(my_path) == len(opp_path) == 1:
+
+    # Classic head swap (1 step only)
+    if len(my_path) == 1 and len(opp_path) == 1:
         if my_path[0] == opp_head and opp_path[0] == my_head:
             return "draw"
-    
+
+    # NEW: I step onto opponent starting head, they do not step onto mine → I lose
+    if my_path[0] == opp_head and not (opp_path[0] == my_head):
+        return "opp_hits_me"
+
+    # Opponent steps onto my starting head alone → I win
+    if opp_path[0] == my_head and not (my_path[0] == opp_head):
+        return "my_hits_opp"
+
     return "continue"
+
 
 # === ENHANCED EVALUATION ===
 def evaluate(bitboard, my_head, opp_head, my_boosts, opp_boosts):
@@ -325,98 +337,105 @@ def get_moves(direction, boosts):
                 moves.append((d, True))
     return moves
 
+
 def order_moves(bitboard, head, direction, boosts, opp_head):
     moves = get_moves(direction, boosts)
     scored = []
-    
+
     for d, b in moves:
         fin = get_final_position(head, d, b)
-        
-        if bitboard.is_occupied(fin[0], fin[1]) and fin != opp_head:
+
+        # If boosting, check intermediate cell
+        mid = path_cells(head, d, 1)[0] if b else None
+
+        # Reject moving into any occupied cell
+        if mid is not None and bitboard.is_occupied(mid[0], mid[1]):
             continue
-        
+        if bitboard.is_occupied(fin[0], fin[1]):
+            continue
+
+        # Reject moving into opponent head — always unsafe unless swap modeled (we do not)
+        if fin == opp_head or (mid is not None and mid == opp_head):
+            continue
+
         libs = count_liberties(bitboard, fin[0], fin[1])
         centerish = -(abs(fin[0] - GRID_WIDTH // 2) + abs(fin[1] - GRID_HEIGHT // 2))
         conserve = 1 if not b else 0
-        
-        # Penalty for moves toward chokepoints
+
+        # Estimate future reach
         test_bb = bitboard.copy()
         test_bb.set(fin[0], fin[1])
         future_reach = flood_fill_bitboard(test_bb, fin[0], fin[1])
-        
+
         score = libs * 100 + centerish * 2 + conserve * 5 + future_reach * 0.5
         scored.append((score, (d, b)))
-    
+
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
 
+
 # === MINIMAX WITH TIGHT TIME CONTROL ===
-def maximin_value(bitboard, my_head, opp_head, my_dir, opp_dir, my_boosts, opp_boosts, depth, alpha, beta):
+def maximin_value(bitboard, my_head, opp_head, my_dir, opp_dir,
+                  my_boosts, opp_boosts, depth, alpha, beta):
+
     global NODES_SEARCHED, START_TIME, TT_AGE, LAST_TIME_CHECK
-    
+
     NODES_SEARCHED += 1
-    
-    # TIGHT time check (every 256 nodes)
+
+    # Tight periodic time check
     if (NODES_SEARCHED & 255) == 0:
-        current_time = time.time() * 1000
-        if current_time > START_TIME + MAX_TIME_MS:
+        if time.time() * 1000 > START_TIME + MAX_TIME_MS:
             raise TimeLimitExceeded()
-        LAST_TIME_CHECK = current_time
-    
+
     if depth == 0:
         return evaluate(bitboard, my_head, opp_head, my_boosts, opp_boosts)
-    
-    # TT with heads
+
+    # Transposition table
     state_hash = compute_hash(bitboard, my_head, opp_head, my_boosts, opp_boosts)
-    cache_key = (state_hash, my_dir, opp_dir, my_boosts, opp_boosts, depth)
-    
-    if cache_key in TT_CACHE:
-        entry = TT_CACHE[cache_key]
-        entry.age = TT_AGE
-        return entry.score
-    
+    key = (state_hash, my_dir, opp_dir, my_boosts, opp_boosts, depth)
+    if key in TT_CACHE:
+        ent = TT_CACHE[key]
+        ent.age = TT_AGE
+        return ent.score
+
     my_moves = order_moves(bitboard, my_head, my_dir, my_boosts, opp_head)
     opp_moves = order_moves(bitboard, opp_head, opp_dir, opp_boosts, my_head)
-    
+
     if not my_moves:
         return LOSE_SCORE
     if not opp_moves:
         return WIN_SCORE
-    
+
     best_value = -np.inf
-    
+
     for my_move_dir, my_boost in my_moves:
         my_final = get_final_position(my_head, my_move_dir, my_boost)
         worst_case = np.inf
-        
+
         for opp_move_dir, opp_boost in opp_moves:
             opp_final = get_final_position(opp_head, opp_move_dir, opp_boost)
-            
-            outcome = joint_collision(my_head, opp_head, my_move_dir, opp_move_dir, my_boost, opp_boost)
+
+            outcome = joint_collision(my_head, opp_head,
+                                      my_move_dir, opp_move_dir,
+                                      my_boost, opp_boost)
+
             if outcome == "draw":
                 value = DRAW_SCORE
                 worst_case = min(worst_case, value)
-                if worst_case <= alpha:
-                    break
                 continue
-            
-            mid = path_cells(my_head, my_move_dir, 1)[0] if my_boost else None
-            mid2 = path_cells(opp_head, opp_move_dir, 1)[0] if opp_boost else None
-            
-            if mid2 is not None and my_final == mid2:
-                value = LOSE_SCORE
-                worst_case = min(worst_case, value)
-                if worst_case <= alpha:
-                    break
-                continue
-            
-            if mid is not None and opp_final == mid:
+            elif outcome == "my_hits_opp":
                 value = WIN_SCORE
                 worst_case = min(worst_case, value)
-                if worst_case <= alpha:
-                    break
                 continue
-            
+            elif outcome == "opp_hits_me":
+                value = LOSE_SCORE
+                worst_case = min(worst_case, value)
+                continue
+
+            # Normal non-collision update
+            mid = path_cells(my_head, my_move_dir, 1)[0] if my_boost else None
+            mid2 = path_cells(opp_head, opp_move_dir, 1)[0] if opp_boost else None
+
             new_bb = bitboard.copy()
             if mid is not None:
                 new_bb.set(mid[0], mid[1])
@@ -424,102 +443,102 @@ def maximin_value(bitboard, my_head, opp_head, my_dir, opp_dir, my_boosts, opp_b
             if mid2 is not None:
                 new_bb.set(mid2[0], mid2[1])
             new_bb.set(opp_final[0], opp_final[1])
-            
+
             new_my_boosts = my_boosts - 1 if my_boost else my_boosts
             new_opp_boosts = opp_boosts - 1 if opp_boost else opp_boosts
-            
-            value = maximin_value(
-                new_bb, my_final, opp_final, my_move_dir, opp_move_dir,
-                new_my_boosts, new_opp_boosts, depth - 1, alpha, beta
-            )
-            
+
+            value = maximin_value(new_bb, my_final, opp_final,
+                                  my_move_dir, opp_move_dir,
+                                  new_my_boosts, new_opp_boosts,
+                                  depth - 1, alpha, beta)
+
             worst_case = min(worst_case, value)
             if worst_case <= alpha:
                 break
-        
+
         best_value = max(best_value, worst_case)
         alpha = max(alpha, best_value)
         if alpha >= beta:
             break
-    
-    # TT with LRU replacement
+
+    # Store in TT
     if len(TT_CACHE) >= MAX_CACHE_SIZE:
-        # Remove oldest entry
-        oldest_key = min(TT_CACHE.keys(), key=lambda k: TT_CACHE[k].age)
-        del TT_CACHE[oldest_key]
-    
-    TT_CACHE[cache_key] = TTEntry(best_value, TT_AGE)
-    
+        old = min(TT_CACHE.keys(), key=lambda k: TT_CACHE[k].age)
+        del TT_CACHE[old]
+
+    TT_CACHE[key] = TTEntry(best_value, TT_AGE)
     return best_value
+
 
 # === ROOT SEARCH ===
 def get_best_move(state):
     global START_TIME, NODES_SEARCHED, TT_CACHE, TT_AGE, LAST_TIME_CHECK
-    
+
     START_TIME = time.time() * 1000
     LAST_TIME_CHECK = START_TIME
     NODES_SEARCHED = 0
     TT_AGE = 0
     TT_CACHE.clear()
-    
+
     bitboard = BitBoard()
     for x, y in state["agent1_trail"]:
         bitboard.set(x, y)
     for x, y in state["agent2_trail"]:
         bitboard.set(x, y)
-    
+
     my_head = state["agent1_trail"][-1]
     opp_head = state["agent2_trail"][-1]
     my_dir = state["my_direction"]
     opp_dir = state["opp_direction"]
     my_boosts = state["agent1_boosts"]
     opp_boosts = state["agent2_boosts"]
-    
+
     valid_moves = order_moves(bitboard, my_head, my_dir, my_boosts, opp_head)
     if not valid_moves:
         return "RIGHT"
-    
+
     best_move = valid_moves[0]
     best_score = -np.inf
-    
+
     try:
         for depth in range(1, MAX_SEARCH_DEPTH + 1):
             TT_AGE += 1
-            
-            elapsed = time.time() * 1000 - START_TIME
-            if elapsed > MAX_TIME_MS - 300:
+
+            if time.time() * 1000 > START_TIME + MAX_TIME_MS - 300:
                 break
-            
+
             current_best = best_move
             current_score = -np.inf
-            
+
             for my_move_dir, my_boost in valid_moves:
                 my_final = get_final_position(my_head, my_move_dir, my_boost)
                 opp_moves = order_moves(bitboard, opp_head, opp_dir, opp_boosts, my_head)
                 worst_case = np.inf
-                
+
                 for opp_move_dir, opp_boost in opp_moves:
                     opp_final = get_final_position(opp_head, opp_move_dir, opp_boost)
-                    
-                    outcome = joint_collision(my_head, opp_head, my_move_dir, opp_move_dir, my_boost, opp_boost)
+
+                    outcome = joint_collision(my_head, opp_head,
+                                              my_move_dir, opp_move_dir,
+                                              my_boost, opp_boost)
+
                     if outcome == "draw":
                         value = DRAW_SCORE
                         worst_case = min(worst_case, value)
                         continue
-                    
-                    mid = path_cells(my_head, my_move_dir, 1)[0] if my_boost else None
-                    mid2 = path_cells(opp_head, opp_move_dir, 1)[0] if opp_boost else None
-                    
-                    if mid2 is not None and my_final == mid2:
-                        value = LOSE_SCORE
-                        worst_case = min(worst_case, value)
-                        continue
-                    
-                    if mid is not None and opp_final == mid:
+                    elif outcome == "my_hits_opp":
                         value = WIN_SCORE
                         worst_case = min(worst_case, value)
                         continue
-                    
+                    elif outcome == "opp_hits_me":
+                        value = LOSE_SCORE
+                        worst_case = min(worst_case, value)
+                        continue
+
+                    # Non-collision state update
+                    mid = path_cells(my_head, my_move_dir, 1)[0] if my_boost else None
+                    mid2 = path_cells(opp_head, opp_move_dir, 1)[0] if opp_boost else None
+
                     new_bb = bitboard.copy()
                     if mid is not None:
                         new_bb.set(mid[0], mid[1])
@@ -527,35 +546,35 @@ def get_best_move(state):
                     if mid2 is not None:
                         new_bb.set(mid2[0], mid2[1])
                     new_bb.set(opp_final[0], opp_final[1])
-                    
+
                     new_my_boosts = my_boosts - 1 if my_boost else my_boosts
                     new_opp_boosts = opp_boosts - 1 if opp_boost else opp_boosts
-                    
+
                     value = maximin_value(
-                        new_bb, my_final, opp_final, my_move_dir, opp_move_dir,
-                        new_my_boosts, new_opp_boosts, depth - 1, -np.inf, np.inf
+                        new_bb, my_final, opp_final,
+                        my_move_dir, opp_move_dir,
+                        new_my_boosts, new_opp_boosts,
+                        depth - 1, -np.inf, np.inf
                     )
-                    
+
                     worst_case = min(worst_case, value)
-                
+
                 if worst_case > current_score:
                     current_score = worst_case
                     current_best = (my_move_dir, my_boost)
-            
+
             best_move = current_best
             best_score = current_score
+
             print(f"[D{depth}] {best_move[0].name}{':BOOST' if best_move[1] else ''} = {best_score:.0f} (n={NODES_SEARCHED:,})")
-    
+
     except (TimeLimitExceeded, RecursionError):
         pass
-    
+
     move_dir, use_boost = best_move
-    move_str = move_dir.name
-    if use_boost:
-        move_str += ":BOOST"
-    
-    print(f"Final: {move_str} (score={best_score})")
-    return move_str
+    out = move_dir.name + (":BOOST" if use_boost else "")
+    print(f"Final: {out} (score={best_score})")
+    return out
 
 # === FLASK ===
 def get_current_direction(trail, player_id):
@@ -640,7 +659,7 @@ def end_game():
     return jsonify({"status": "acknowledged"}), 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5009"))
+    port = int(os.environ.get("PORT", "5008"))
     print(f"=== {AGENT_NAME} ({PARTICIPANT}) on port {port} ===")
     print(f"✅ Voronoi (no double-count) | ✅ Chokepoint detection | ✅ TT with heads + LRU")
     print(f"✅ Tight time control (256 nodes) | ✅ 2M TT entries | ✅ Enhanced eval")
